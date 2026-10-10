@@ -2,7 +2,7 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::write::GzEncoder;
@@ -22,11 +22,16 @@ Použití:
   lafe-backup unexclude <jméno>... přestat je přeskakovat
   lafe-backup keep <n>             kolik posledních archivů ponechat (0 = nemazat)
   lafe-backup name <jméno>         prefix archivu -> <jméno>-RRRRMMDD-HHMMSS.tar.gz
+  lafe-backup schedule <kdy>       jak často zálohovat: daily 03:00, 6h, hourly,
+                                   Mon 02:30, weekly, off (nebo systemd OnCalendar)
   lafe-backup show | list          vypsat aktuální nastavení
   lafe-backup run [--dry-run]      provést zálohu (--dry-run jen vypíše, co by se zálohovalo)
 
 Nastavení je v ~/.config/lafe-backup/config (jinou cestu určí LAFE_BACKUP_CONFIG).
 Symlinky se ukládají jako symlinky (nenásledují se).";
+
+const SERVICE: &str = "lafe-backup.service";
+const TIMER: &str = "lafe-backup.timer";
 
 struct Config {
     sources: Vec<PathBuf>,
@@ -58,15 +63,18 @@ struct Stats {
     skipped: u64,
 }
 
+fn config_home() -> Result<PathBuf, String> {
+    Ok(match env::var_os("XDG_CONFIG_HOME") {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(env::var_os("HOME").ok_or("není nastaveno HOME")?).join(".config"),
+    })
+}
+
 fn config_path() -> Result<PathBuf, String> {
     if let Some(p) = env::var_os("LAFE_BACKUP_CONFIG") {
         return Ok(PathBuf::from(p));
     }
-    let base = match env::var_os("XDG_CONFIG_HOME") {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(env::var_os("HOME").ok_or("není nastaveno HOME")?).join(".config"),
-    };
-    Ok(base.join("lafe-backup").join("config"))
+    Ok(config_home()?.join("lafe-backup").join("config"))
 }
 
 fn parse_keep(v: &str) -> Result<usize, String> {
@@ -327,6 +335,113 @@ fn prune(cfg: &Config, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn systemctl(args: &[&str]) -> Result<(), String> {
+    let out = Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .output()
+        .map_err(|e| format!("nelze spustit systemctl: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "systemctl {} selhalo: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr).trim()
+    ))
+}
+
+/// Turns `6h` or `daily 03:00` into a systemd calendar expression. Anything
+/// else (`hourly`, `Mon 02:30`, `*-*-01 04:00`) already is one.
+fn calendar_expr(input: &str) -> Result<String, String> {
+    if input.contains('\n') {
+        return Err("četnost nesmí obsahovat nový řádek".into());
+    }
+    if let Some(n) = input.strip_suffix('h').and_then(|n| n.parse::<u32>().ok()) {
+        return match n {
+            1..=23 => Ok(format!("0/{n}:00:00")),
+            _ => Err("interval v hodinách musí být 1h až 23h (jinak daily)".into()),
+        };
+    }
+    Ok(match input.strip_prefix("daily ") {
+        Some(time) => time.trim().to_string(),
+        None => input.to_string(),
+    })
+}
+
+/// Validates `expr` with systemd and returns when it would fire next.
+fn next_elapse(expr: &str) -> Result<String, String> {
+    let out = Command::new("systemd-analyze")
+        .args(["calendar", expr])
+        .output()
+        .map_err(|e| format!("nelze spustit systemd-analyze: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("neplatná četnost: {expr:?}"));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Next elapse: "))
+        .unwrap_or("?")
+        .to_string())
+}
+
+/// The schedule lives in the systemd user timer, which is generated here.
+fn set_schedule(input: &str) -> Result<String, String> {
+    let dir = config_home()?.join("systemd").join("user");
+    let timer = dir.join(TIMER);
+    let io_err = |p: &Path, e: io::Error| format!("nelze zapsat {}: {e}", p.display());
+
+    if input == "off" {
+        if timer.exists() {
+            systemctl(&["disable", "--now", TIMER])?;
+            fs::remove_file(&timer).map_err(|e| io_err(&timer, e))?;
+            systemctl(&["daemon-reload"])?;
+        }
+        return Ok("automatické zálohy vypnuty".into());
+    }
+
+    let expr = calendar_expr(input)?;
+    let next = next_elapse(&expr)?;
+    fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
+    let service = dir.join(SERVICE);
+    if !service.exists() {
+        let exe = env::current_exe().map_err(|e| format!("nelze zjistit cestu k programu: {e}"))?;
+        let unit = format!(
+            "[Unit]\nDescription=Záloha lafe-backup (nastavení: lafe-backup show)\n\n\
+             [Service]\nType=oneshot\nNice=10\nExecStart=\"{}\" run\n",
+            exe.display()
+        );
+        fs::write(&service, unit).map_err(|e| io_err(&service, e))?;
+    }
+    let unit = format!(
+        "[Unit]\nDescription=Automatická záloha lafe-backup\n\n\
+         [Timer]\nOnCalendar={expr}\nRandomizedDelaySec=10min\nPersistent=true\n\n\
+         [Install]\nWantedBy=timers.target\n"
+    );
+    fs::write(&timer, unit).map_err(|e| io_err(&timer, e))?;
+    systemctl(&["daemon-reload"])?;
+    systemctl(&["enable", TIMER])?;
+    systemctl(&["restart", TIMER])?;
+    Ok(format!("četnost: {expr} (další běh {next})"))
+}
+
+/// The calendar expression of the installed timer, if there is one.
+fn current_schedule() -> Option<String> {
+    let timer = config_home().ok()?.join("systemd").join("user").join(TIMER);
+    let text = fs::read_to_string(timer).ok()?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("OnCalendar="))
+        .map(str::to_string)
+}
+
+fn schedule_summary() -> String {
+    match current_schedule() {
+        None => "vypnuto".into(),
+        Some(expr) if systemctl(&["is-enabled", "--quiet", TIMER]).is_ok() => expr,
+        Some(expr) => format!("{expr} (timer není zapnutý!)"),
+    }
+}
+
 fn show(path: &Path, cfg: &Config) {
     println!("Nastavení:  {}", path.display());
     match &cfg.dest {
@@ -341,6 +456,7 @@ fn show(path: &Path, cfg: &Config) {
         0 => println!("Ponechat:   vše"),
         n => println!("Ponechat:   posledních {n}"),
     }
+    println!("Četnost:    {}", schedule_summary());
     if !cfg.excludes.is_empty() {
         println!("Vynechat:   {}", cfg.excludes.join(", "));
     }
@@ -525,6 +641,10 @@ fn run(args: &[String]) -> Result<(), String> {
             let name = one_arg()?;
             check_name(name)?;
             cfg.name = name.to_string();
+        }
+        "schedule" => {
+            println!("{}", set_schedule(need_args()?.join(" ").trim())?);
+            return Ok(());
         }
         "show" | "list" => {
             show(&path, &cfg);

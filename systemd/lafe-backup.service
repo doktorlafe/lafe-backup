@@ -1,7 +1,0 @@
-[Unit]
-Description=Záloha na Hetzner Storage Box (nastavení: lafe-backup show)
-
-[Service]
-Type=oneshot
-Nice=10
-ExecStart=%h/.local/bin/lafe-backup run

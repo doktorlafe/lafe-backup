@@ -13,7 +13,8 @@ use ratatui::widgets::{Block, List, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::{
-    absolute, backup, check_name, existing_archives, mount_of, parse_keep, save_config, Config,
+    absolute, backup, check_name, current_schedule, existing_archives, mount_of, parse_keep,
+    save_config, schedule_summary, set_schedule, Config,
 };
 
 #[derive(Clone, Copy)]
@@ -23,6 +24,7 @@ enum Row {
     Dest,
     Name,
     Keep,
+    Schedule,
     Source(usize),
     AddSource,
     Exclude(usize),
@@ -42,6 +44,7 @@ enum Field {
     Dest,
     Name,
     Keep,
+    Schedule,
     Source,
     Exclude,
 }
@@ -52,6 +55,7 @@ impl Field {
             Field::Dest => "Cílová složka",
             Field::Name => "Jméno archivu",
             Field::Keep => "Kolik záloh ponechat (0 = vše)",
+            Field::Schedule => "Jak často (daily 03:00, 6h, hourly, Mon 02:30, off)",
             Field::Source => "Cesta k zálohování",
             Field::Exclude => "Jméno k vynechání",
         }
@@ -162,6 +166,7 @@ struct App {
     /// Message and whether it is an error.
     status: Option<(String, bool)>,
     archives: String,
+    schedule: String,
 }
 
 fn home() -> PathBuf {
@@ -201,6 +206,7 @@ impl App {
             Row::Dest,
             Row::Name,
             Row::Keep,
+            Row::Schedule,
             Row::Blank,
             Row::Header("Co zálohovat"),
         ];
@@ -297,6 +303,11 @@ impl App {
                 self.cfg.keep = parse_keep(value)?;
                 self.save("uloženo");
             }
+            Field::Schedule => {
+                let msg = set_schedule(value)?;
+                self.schedule = schedule_summary();
+                self.ok(msg);
+            }
             Field::Source => {
                 let src = absolute(&expand_tilde(value))?;
                 fs::symlink_metadata(&src).map_err(|e| format!("{}: {e}", src.display()))?;
@@ -359,6 +370,9 @@ impl App {
                 Row::Dest => self.mode = Mode::Browse(self.browse_dest()),
                 Row::Name => self.mode = input(Field::Name, self.cfg.name.clone()),
                 Row::Keep => self.mode = input(Field::Keep, self.cfg.keep.to_string()),
+                Row::Schedule => {
+                    self.mode = input(Field::Schedule, current_schedule().unwrap_or_default())
+                }
                 Row::AddSource => self.mode = Mode::Browse(Browser::new(false, home())),
                 Row::AddExclude => self.mode = input(Field::Exclude, String::new()),
                 Row::Source(_) | Row::Exclude(_) => self.ok("d = odebrat ze seznamu"),
@@ -541,6 +555,7 @@ impl App {
                 },
                 String::new(),
             ),
+            Row::Schedule => field("Četnost", self.schedule.clone(), String::new()),
             Row::Source(i) => {
                 let src = &self.cfg.sources[i];
                 let mut line = vec![Span::raw(src.display().to_string())];
@@ -643,6 +658,7 @@ impl App {
 pub fn run(path: PathBuf, cfg: Config) -> Result<(), String> {
     let mut app = App {
         archives: archive_summary(&cfg),
+        schedule: schedule_summary(),
         path,
         cfg,
         sel: 1,

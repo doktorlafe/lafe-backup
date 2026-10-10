@@ -15,9 +15,12 @@ síťovém disku) a staré archivy průběžně maže.
 Je potřeba [Rust](https://rustup.rs) a C linker (`gcc`).
 
 ```sh
-cargo build --release
-install -Dm755 target/release/lafe-backup ~/.local/bin/lafe-backup
+sh install.sh
 ```
+
+Skript sestaví release verzi (do `~/.cache/lafe-backup-target`, aby to šlo i ze
+síťového disku bez práva spouštění) a nainstaluje ji do `~/.local/bin/lafe-backup`.
+Stejně se instaluje i každá další aktualizace.
 
 ## Použití
 
@@ -45,6 +48,7 @@ lafe-backup exclude <jméno>...   přeskakovat soubory/složky s tímto jménem
 lafe-backup unexclude <jméno>... přestat je přeskakovat
 lafe-backup keep <n>             kolik posledních archivů ponechat (0 = nemazat)
 lafe-backup name <jméno>         prefix archivu -> <jméno>-RRRRMMDD-HHMMSS.tar.gz
+lafe-backup schedule <kdy>       jak často zálohovat (viz níže)
 lafe-backup show | list          vypsat aktuální nastavení
 lafe-backup run [--dry-run]      provést zálohu (--dry-run jen vypíše, co by se zálohovalo)
 ```
@@ -54,14 +58,21 @@ proměnná `LAFE_BACKUP_CONFIG`).
 
 ## Automatické spouštění
 
-Ve složce `systemd/` je služba a timer, který zálohu pouští denně ve 03:00:
+Četnost se nastavuje řádkem „Četnost“ v interaktivním rozhraní nebo příkazem
+`schedule`, který vygeneruje a zapne systemd timer uživatele
+(`~/.config/systemd/user/lafe-backup.{service,timer}`):
 
 ```sh
-cp systemd/lafe-backup.{service,timer} ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now lafe-backup.timer
-sudo loginctl enable-linger "$USER"   # aby timer běžel i bez přihlášení
+lafe-backup schedule daily 03:00   # každý den ve 03:00
+lafe-backup schedule 6h            # každých 6 hodin
+lafe-backup schedule hourly        # každou hodinu
+lafe-backup schedule Mon 02:30     # každé pondělí ve 02:30
+lafe-backup schedule off           # vypnout automatické zálohy
+sudo loginctl enable-linger "$USER"   # jednou: aby timer běžel i bez přihlášení
 ```
+
+Projde i jakýkoli jiný výraz systemd `OnCalendar` (`man systemd.time`). Při
+častějších zálohách nezapomeňte zvýšit `keep` – počítá archivy, ne dny.
 
 ## Obnova
 
