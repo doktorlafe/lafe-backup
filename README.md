@@ -58,8 +58,9 @@ proměnná `LAFE_BACKUP_CONFIG`).
 
 ## Automatické spouštění
 
-Četnost se nastavuje řádkem „Četnost“ v interaktivním rozhraní nebo příkazem
-`schedule`, který vygeneruje a zapne systemd timer uživatele
+Četnost se nastavuje řádkem „Četnost“ v interaktivním rozhraní – `Enter` na něm
+otevře výběr (každou hodinu, každých 2–12 hodin, denně, týdně, vypnuto), kde
+`←` `→` mění hodinu a `Tab` den v týdnu – nebo příkazem `schedule`, který vygeneruje a zapne systemd timer uživatele
 (`~/.config/systemd/user/lafe-backup.{service,timer}`):
 
 ```sh

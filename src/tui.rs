@@ -55,7 +55,7 @@ impl Field {
             Field::Dest => "Cílová složka",
             Field::Name => "Jméno archivu",
             Field::Keep => "Kolik záloh ponechat (0 = vše)",
-            Field::Schedule => "Jak často (daily 03:00, 6h, hourly, Mon 02:30, off)",
+            Field::Schedule => "Výraz (daily 03:15, Mon,Thu 02:30, *-*-01 04:00, off)",
             Field::Source => "Cesta k zálohování",
             Field::Exclude => "Jméno k vynechání",
         }
@@ -146,10 +146,160 @@ impl Browser {
     }
 }
 
+/// Weekday as systemd spells it and as it reads after "týdně".
+const DAYS: [(&str, &str); 7] = [
+    ("Mon", "v pondělí"),
+    ("Tue", "v úterý"),
+    ("Wed", "ve středu"),
+    ("Thu", "ve čtvrtek"),
+    ("Fri", "v pátek"),
+    ("Sat", "v sobotu"),
+    ("Sun", "v neděli"),
+];
+
+/// The schedules the picker can express.
+#[derive(Clone, Copy)]
+enum Sched {
+    Hours(u32),
+    Daily { hour: u32, minute: u32 },
+    Weekly { day: usize, hour: u32, minute: u32 },
+}
+
+impl Sched {
+    /// Reads back a calendar expression written by `set_schedule`.
+    fn parse(expr: &str) -> Option<Sched> {
+        let expr = expr.strip_prefix("*-*-* ").unwrap_or(expr);
+        if expr == "hourly" {
+            return Some(Sched::Hours(1));
+        }
+        if let Some(n) = expr.strip_prefix("0/").and_then(|r| r.strip_suffix(":00:00")) {
+            return n.parse().ok().filter(|n| (1..24).contains(n)).map(Sched::Hours);
+        }
+        let (day, time) = match expr.split_once(' ') {
+            Some((d, time)) => (Some(DAYS.iter().position(|(name, _)| *name == d)?), time),
+            None => (None, expr),
+        };
+        let mut parts = time.split(':');
+        let hour = parts.next()?.parse().ok().filter(|h| *h < 24)?;
+        let minute = parts.next()?.parse().ok().filter(|m| *m < 60)?;
+        if !matches!((parts.next(), parts.next()), (None | Some("00"), None)) {
+            return None;
+        }
+        Some(match day {
+            Some(day) => Sched::Weekly { day, hour, minute },
+            None => Sched::Daily { hour, minute },
+        })
+    }
+
+    fn label(self) -> String {
+        match self {
+            Sched::Hours(1) => "každou hodinu".into(),
+            Sched::Hours(n @ 2..=4) => format!("každé {n} hodiny"),
+            Sched::Hours(n) => format!("každých {n} hodin"),
+            Sched::Daily { hour, minute } => format!("denně v {hour:02}:{minute:02}"),
+            Sched::Weekly { day, hour, minute } => {
+                format!("týdně {} v {hour:02}:{minute:02}", DAYS[day].1)
+            }
+        }
+    }
+
+    /// What `set_schedule` accepts.
+    fn command(self) -> String {
+        match self {
+            Sched::Hours(1) => "hourly".into(),
+            Sched::Hours(n) => format!("{n}h"),
+            Sched::Daily { hour, minute } => format!("{hour:02}:{minute:02}"),
+            Sched::Weekly { day, hour, minute } => {
+                format!("{} {hour:02}:{minute:02}", DAYS[day].0)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Choice {
+    Off,
+    Hours(u32),
+    Daily,
+    Weekly,
+    Custom,
+}
+
+const CHOICES: [Choice; 11] = [
+    Choice::Off,
+    Choice::Hours(1),
+    Choice::Hours(2),
+    Choice::Hours(3),
+    Choice::Hours(4),
+    Choice::Hours(6),
+    Choice::Hours(8),
+    Choice::Hours(12),
+    Choice::Daily,
+    Choice::Weekly,
+    Choice::Custom,
+];
+
+/// Schedule picker; the time and weekday apply to the daily and weekly rows.
+struct Picker {
+    sel: usize,
+    day: usize,
+    hour: u32,
+    minute: u32,
+}
+
+impl Picker {
+    /// Starts on the row matching the installed timer.
+    fn new() -> Self {
+        let mut p = Picker {
+            sel: 0,
+            day: 0,
+            hour: 3,
+            minute: 0,
+        };
+        let Some(expr) = current_schedule() else {
+            return p;
+        };
+        let pos = |want: fn(&Choice) -> bool| CHOICES.iter().position(want);
+        p.sel = match Sched::parse(&expr) {
+            Some(Sched::Hours(n)) => CHOICES
+                .iter()
+                .position(|c| matches!(c, Choice::Hours(m) if *m == n)),
+            Some(Sched::Daily { hour, minute }) => {
+                (p.hour, p.minute) = (hour, minute);
+                pos(|c| matches!(c, Choice::Daily))
+            }
+            Some(Sched::Weekly { day, hour, minute }) => {
+                (p.day, p.hour, p.minute) = (day, hour, minute);
+                pos(|c| matches!(c, Choice::Weekly))
+            }
+            None => None,
+        }
+        .unwrap_or(CHOICES.len() - 1);
+        p
+    }
+
+    fn sched(&self, choice: Choice) -> Option<Sched> {
+        let (day, hour, minute) = (self.day, self.hour, self.minute);
+        match choice {
+            Choice::Hours(n) => Some(Sched::Hours(n)),
+            Choice::Daily => Some(Sched::Daily { hour, minute }),
+            Choice::Weekly => Some(Sched::Weekly { day, hour, minute }),
+            Choice::Off | Choice::Custom => None,
+        }
+    }
+}
+
+/// The installed schedule in words where the picker understands it.
+fn schedule_label() -> String {
+    let summary = schedule_summary();
+    Sched::parse(&summary).map_or(summary, Sched::label)
+}
+
 enum Mode {
     Main,
     Input { field: Field, buf: String },
     Browse(Browser),
+    Schedule(Picker),
 }
 
 enum Action {
@@ -305,7 +455,7 @@ impl App {
             }
             Field::Schedule => {
                 let msg = set_schedule(value)?;
-                self.schedule = schedule_summary();
+                self.schedule = schedule_label();
                 self.ok(msg);
             }
             Field::Source => {
@@ -354,6 +504,7 @@ impl App {
             Mode::Main => return self.key_main(key),
             Mode::Input { field, buf } => self.key_input(key, field, buf),
             Mode::Browse(browser) => self.key_browse(key, browser),
+            Mode::Schedule(picker) => self.key_schedule(key, picker),
         }
         Action::None
     }
@@ -370,9 +521,7 @@ impl App {
                 Row::Dest => self.mode = Mode::Browse(self.browse_dest()),
                 Row::Name => self.mode = input(Field::Name, self.cfg.name.clone()),
                 Row::Keep => self.mode = input(Field::Keep, self.cfg.keep.to_string()),
-                Row::Schedule => {
-                    self.mode = input(Field::Schedule, current_schedule().unwrap_or_default())
-                }
+                Row::Schedule => self.mode = Mode::Schedule(Picker::new()),
                 Row::AddSource => self.mode = Mode::Browse(Browser::new(false, home())),
                 Row::AddExclude => self.mode = input(Field::Exclude, String::new()),
                 Row::Source(_) | Row::Exclude(_) => self.ok("d = odebrat ze seznamu"),
@@ -386,6 +535,9 @@ impl App {
                     self.mode = input(Field::Dest, current.unwrap_or_default());
                 }
                 Row::AddSource => self.mode = input(Field::Source, String::new()),
+                Row::Schedule => {
+                    self.mode = input(Field::Schedule, current_schedule().unwrap_or_default())
+                }
                 _ => {}
             },
             KeyCode::Char('d') | KeyCode::Delete => match row {
@@ -463,6 +615,58 @@ impl App {
         self.mode = Mode::Browse(b);
     }
 
+    fn key_schedule(&mut self, key: KeyCode, mut p: Picker) {
+        let choice = CHOICES[p.sel];
+        let timed = matches!(choice, Choice::Daily | Choice::Weekly);
+        match key {
+            KeyCode::Esc | KeyCode::Char('q') => return,
+            KeyCode::Up | KeyCode::Char('k') => p.sel = p.sel.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => p.sel = (p.sel + 1).min(CHOICES.len() - 1),
+            KeyCode::Left | KeyCode::Char('h') if timed => p.hour = (p.hour + 23) % 24,
+            KeyCode::Right | KeyCode::Char('l') if timed => p.hour = (p.hour + 1) % 24,
+            KeyCode::Tab if matches!(choice, Choice::Weekly) => p.day = (p.day + 1) % 7,
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let value = match (choice, p.sched(choice)) {
+                    (Choice::Custom, _) => {
+                        let buf = current_schedule().unwrap_or_default();
+                        self.mode = Mode::Input {
+                            field: Field::Schedule,
+                            buf,
+                        };
+                        return;
+                    }
+                    (_, Some(sched)) => sched.command(),
+                    (_, None) => "off".into(),
+                };
+                if let Err(e) = self.apply_input(Field::Schedule, &value) {
+                    self.status = Some((e, true));
+                }
+                return;
+            }
+            _ => {}
+        }
+        self.mode = Mode::Schedule(p);
+    }
+
+    fn draw_schedule(&self, f: &mut Frame, area: Rect, p: &Picker) {
+        let dim = Style::new().fg(Color::DarkGray);
+        let items = CHOICES.iter().map(|&choice| {
+            let hint = match choice {
+                Choice::Daily => "   ←→ hodina",
+                Choice::Weekly => "   ←→ hodina · Tab den",
+                _ => "",
+            };
+            let text = match (choice, p.sched(choice)) {
+                (_, Some(sched)) => sched.label(),
+                (Choice::Custom, _) => "vlastní výraz…".into(),
+                _ => "vypnuto".into(),
+            };
+            Line::from(vec![Span::raw(text), Span::styled(hint, dim)])
+        });
+        let title = " Jak často zálohovat ".to_string();
+        self.render_list(f, area, items.collect(), title, p.sel);
+    }
+
     fn draw(&self, f: &mut Frame) {
         let [body, status, help] = Layout::vertical([
             Constraint::Min(3),
@@ -480,6 +684,10 @@ impl App {
                 } else {
                     "↑↓ pohyb · Enter/→ otevřít · ← zpět · mezerník přidat/odebrat · . skryté · e napsat cestu · Esc hotovo"
                 }
+            }
+            Mode::Schedule(p) => {
+                self.draw_schedule(f, body, p);
+                "↑↓ pohyb · ←→ hodina · Tab den · Enter nastavit · Esc zrušit"
             }
             Mode::Input { .. } => {
                 self.draw_main(f, body);
@@ -658,7 +866,7 @@ impl App {
 pub fn run(path: PathBuf, cfg: Config) -> Result<(), String> {
     let mut app = App {
         archives: archive_summary(&cfg),
-        schedule: schedule_summary(),
+        schedule: schedule_label(),
         path,
         cfg,
         sel: 1,
