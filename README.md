@@ -1,85 +1,88 @@
 # lafe-backup
 
-Malý zálohovací nástroj v Rustu. Vybrané složky a soubory zabalí do jednoho
-`.tar.gz` archivu s časovou značkou v cílové složce (typicky na připojeném
-síťovém disku) a staré archivy průběžně maže.
+A small backup tool written in Rust. It packs the selected folders and files
+into a single timestamped `.tar.gz` archive in a destination folder (typically
+on a mounted network drive) and prunes old archives as it goes.
 
-- nastavení přes interaktivní rozhraní v terminálu nebo přes příkazy
-- archiv zachovává práva, vlastníky i symlinky (symlinky se nenásledují)
-- pokud cíl leží na připojeném disku a ten zrovna připojený není, záloha skončí
-  chybou a na lokální disk nic nezapíše
-- archiv se píše jako `.partial` a přejmenuje se až po úspěšném dokončení
+- configured through an interactive terminal UI or through commands
+- the archive preserves permissions, owners and symlinks (symlinks are not followed)
+- if the destination lives on a mounted drive that is not currently mounted, the
+  backup fails and writes nothing to the local disk
+- the archive is written as `.partial` and renamed only after it completes successfully
 
-## Instalace
+The interface and its messages are in Czech.
 
-Je potřeba [Rust](https://rustup.rs) a C linker (`gcc`).
+## Installation
+
+Requires [Rust](https://rustup.rs) and a C linker (`gcc`).
 
 ```sh
 sh install.sh
 ```
 
-Skript sestaví release verzi (do `~/.cache/lafe-backup-target`, aby to šlo i ze
-síťového disku bez práva spouštění) a nainstaluje ji do `~/.local/bin/lafe-backup`.
-Stejně se instaluje i každá další aktualizace.
+The script builds a release binary (in `~/.cache/lafe-backup-target`, so it also
+works from a network drive without execute permission) and installs it to
+`~/.local/bin/lafe-backup`. Updates are installed the same way.
 
-## Použití
+## Usage
 
-Samotné `lafe-backup` otevře interaktivní nastavení:
+Running `lafe-backup` on its own opens the interactive settings:
 
-| Klávesa | Akce |
+| Key | Action |
 | --- | --- |
-| `↑` `↓` / `j` `k` | pohyb |
-| `Enter` | upravit řádek, otevřít prohlížeč složek |
-| `mezerník` | v prohlížeči přidat/odebrat zdroj, vybrat cíl |
-| `←` `→` | v prohlížeči o úroveň výš / do složky |
-| `.` | zobrazit skryté soubory |
-| `e` | napsat cestu ručně |
-| `d` | odebrat zdroj nebo vynechané jméno |
-| `r` | spustit zálohu |
-| `q` | konec |
+| `↑` `↓` / `j` `k` | move |
+| `Enter` | edit the row, open the folder browser |
+| `Space` | in the browser, add/remove a source or pick the destination |
+| `←` `→` | in the browser, go up a level / into a folder |
+| `.` | show hidden files |
+| `e` | type a path by hand |
+| `d` | remove a source or an excluded name |
+| `r` | run a backup |
+| `q` | quit |
 
-Totéž jde udělat příkazy:
+The same can be done with commands:
 
 ```
-lafe-backup add <cesta>...       přidat složky/soubory k zálohování
-lafe-backup remove <cesta>...    odebrat je ze zálohování
-lafe-backup dest <složka>        nastavit, kam se archivy ukládají
-lafe-backup exclude <jméno>...   přeskakovat soubory/složky s tímto jménem
-lafe-backup unexclude <jméno>... přestat je přeskakovat
-lafe-backup keep <n>             kolik posledních archivů ponechat (0 = nemazat)
-lafe-backup name <jméno>         prefix archivu -> <jméno>-RRRRMMDD-HHMMSS.tar.gz
-lafe-backup schedule <kdy>       jak často zálohovat (viz níže)
-lafe-backup show | list          vypsat aktuální nastavení
-lafe-backup run [--dry-run]      provést zálohu (--dry-run jen vypíše, co by se zálohovalo)
+lafe-backup add <path>...        add folders/files to back up
+lafe-backup remove <path>...     stop backing them up
+lafe-backup dest <folder>        set where archives are stored
+lafe-backup exclude <name>...    skip files/folders with this name
+lafe-backup unexclude <name>...  stop skipping them
+lafe-backup keep <n>             how many recent archives to keep (0 = never delete)
+lafe-backup name <name>          archive prefix -> <name>-YYYYMMDD-HHMMSS.tar.gz
+lafe-backup schedule <when>      how often to back up (see below)
+lafe-backup show | list          print the current settings
+lafe-backup run [--dry-run]      run a backup (--dry-run only lists what would be backed up)
 ```
 
-Nastavení se ukládá do `~/.config/lafe-backup/config` (jinou cestu určí
-proměnná `LAFE_BACKUP_CONFIG`).
+Settings are stored in `~/.config/lafe-backup/config` (set the
+`LAFE_BACKUP_CONFIG` variable to use a different path).
 
-## Automatické spouštění
+## Automatic backups
 
-Četnost se nastavuje řádkem „Četnost“ v interaktivním rozhraní – `Enter` na něm
-otevře výběr (každou hodinu, každých 2–12 hodin, denně, týdně, vypnuto), kde
-`←` `→` mění hodinu a `Tab` den v týdnu – nebo příkazem `schedule`, který vygeneruje a zapne systemd timer uživatele
+The frequency is set on the “Četnost” (frequency) row of the interactive UI –
+`Enter` on it opens a picker (hourly, every 2–12 hours, daily, weekly, off),
+where `←` `→` change the hour and `Tab` the day of the week – or with the
+`schedule` command, which generates and enables a systemd user timer
 (`~/.config/systemd/user/lafe-backup.{service,timer}`):
 
 ```sh
-lafe-backup schedule daily 03:00   # každý den ve 03:00
-lafe-backup schedule 6h            # každých 6 hodin
-lafe-backup schedule hourly        # každou hodinu
-lafe-backup schedule Mon 02:30     # každé pondělí ve 02:30
-lafe-backup schedule off           # vypnout automatické zálohy
-sudo loginctl enable-linger "$USER"   # jednou: aby timer běžel i bez přihlášení
+lafe-backup schedule daily 03:00   # every day at 03:00
+lafe-backup schedule 6h            # every 6 hours
+lafe-backup schedule hourly        # every hour
+lafe-backup schedule Mon 02:30     # every Monday at 02:30
+lafe-backup schedule off           # turn automatic backups off
+sudo loginctl enable-linger "$USER"   # once: so the timer runs even when you are not logged in
 ```
 
-Projde i jakýkoli jiný výraz systemd `OnCalendar` (`man systemd.time`). Při
-častějších zálohách nezapomeňte zvýšit `keep` – počítá archivy, ne dny.
+Any other systemd `OnCalendar` expression works too (`man systemd.time`). With
+more frequent backups, remember to raise `keep` – it counts archives, not days.
 
-## Obnova
+## Restoring
 
-Archiv obsahuje absolutní cesty bez úvodního lomítka, takže se rozbaluje
-běžným `tar`:
+The archive holds absolute paths without the leading slash, so it unpacks with
+plain `tar`:
 
 ```sh
-tar -xzf lafe-arm-20261010-225854.tar.gz -C /cilova/slozka
+tar -xzf lafe-arm-20261010-225854.tar.gz -C /target/folder
 ```
