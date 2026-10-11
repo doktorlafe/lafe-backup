@@ -1,6 +1,7 @@
 #!/bin/sh
 # Sestaví aktuální verzi a nainstaluje ji do ~/.local/bin.
 # Spouštět jako `sh install.sh` (na síťovém disku soubory nemívají právo spouštění).
+# `sh install.sh --system` navíc přidá odkaz do /usr/local/bin, aby šlo `sudo lafe-backup`.
 set -eu
 
 cd "$(dirname "$0")"
@@ -21,6 +22,10 @@ cargo build --release --locked
 install -Dm755 "$CARGO_TARGET_DIR/release/lafe-backup" "$bin_dir/lafe-backup"
 echo
 echo "nainstalováno: $bin_dir/lafe-backup"
+if [ "${1:-}" = --system ]; then
+    sudo ln -sf "$bin_dir/lafe-backup" /usr/local/bin/lafe-backup
+    echo "odkaz pro sudo: /usr/local/bin/lafe-backup"
+fi
 
 case ":$PATH:" in
     *":$bin_dir:"*) ;;

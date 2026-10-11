@@ -70,6 +70,23 @@ sudo loginctl enable-linger "$USER"   # once: so the timer runs even when you ar
 Any other systemd `OnCalendar` expression works too (`man systemd.time`). With
 more frequent backups, remember to raise `keep` – it counts archives, not days.
 
+## Backing up system folders
+
+Folders only root can read (`/etc`, parts of `/opt`, …) are skipped with a
+warning when the backup runs as a normal user. To include them, install with a
+link that `sudo` can find and schedule the backup through `sudo`:
+
+```sh
+sh install.sh --system             # also links /usr/local/bin/lafe-backup
+sudo lafe-backup schedule hourly   # system timer, backups run as root
+```
+
+`sudo lafe-backup` uses the same settings as `lafe-backup` (the config of the
+user who called `sudo`). Scheduling through `sudo` replaces the user timer with
+a system one in `/etc/systemd/system`; from then on the frequency is changed
+with `sudo` too. Such archives contain everything root can read, so keep the
+destination private.
+
 ## Restoring
 
 The archive holds absolute paths without the leading slash, so it unpacks with

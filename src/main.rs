@@ -1,6 +1,7 @@
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, IsTerminal, Write};
+use std::os::unix::fs::{chown, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,10 +29,13 @@ Použití:
   lafe-backup run [--dry-run]      provést zálohu (--dry-run jen vypíše, co by se zálohovalo)
 
 Nastavení je v ~/.config/lafe-backup/config (jinou cestu určí LAFE_BACKUP_CONFIG).
+Systémové složky: `sudo lafe-backup ...` pracuje se stejným nastavením a příkaz
+schedule pak zapne systémový timer, takže zálohy běží jako root.
 Symlinky se ukládají jako symlinky (nenásledují se).";
 
 const SERVICE: &str = "lafe-backup.service";
 const TIMER: &str = "lafe-backup.timer";
+const SYSTEM_UNITS: &str = "/etc/systemd/system";
 
 struct Config {
     sources: Vec<PathBuf>,
@@ -63,11 +67,47 @@ struct Stats {
     skipped: u64,
 }
 
-fn config_home() -> Result<PathBuf, String> {
-    Ok(match env::var_os("XDG_CONFIG_HOME") {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(env::var_os("HOME").ok_or("není nastaveno HOME")?).join(".config"),
+fn is_root() -> bool {
+    fs::metadata("/proc/self").is_ok_and(|m| m.uid() == 0)
+}
+
+/// The user who ran us through sudo.
+struct Invoker {
+    name: String,
+    uid: u32,
+    gid: u32,
+    home: PathBuf,
+}
+
+fn invoker() -> Option<Invoker> {
+    if !is_root() {
+        return None;
+    }
+    let uid = env::var("SUDO_UID").ok()?;
+    let passwd = fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().find_map(|line| {
+        let f: Vec<&str> = line.split(':').collect();
+        if f.len() < 6 || f[2] != uid {
+            return None;
+        }
+        Some(Invoker {
+            name: f[0].to_string(),
+            uid: f[2].parse().ok()?,
+            gid: f[3].parse().ok()?,
+            home: PathBuf::from(f[5]),
+        })
     })
+}
+
+/// Under sudo this is the invoking user's directory, so both share one config.
+fn config_home() -> Result<PathBuf, String> {
+    if let Some(dir) = env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(dir));
+    }
+    if let Some(inv) = invoker() {
+        return Ok(inv.home.join(".config"));
+    }
+    Ok(PathBuf::from(env::var_os("HOME").ok_or("není nastaveno HOME")?).join(".config"))
 }
 
 fn config_path() -> Result<PathBuf, String> {
@@ -132,12 +172,20 @@ fn save_config(path: &Path, cfg: &Config) -> Result<(), String> {
         text += &format!("exclude={ex}\n");
     }
     let write = || -> io::Result<()> {
-        if let Some(dir) = path.parent() {
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+        if let Some(dir) = dir {
             fs::create_dir_all(dir)?;
         }
         let tmp = path.with_extension("tmp");
         fs::write(&tmp, &text)?;
-        fs::rename(&tmp, path)
+        fs::rename(&tmp, path)?;
+        // Written through sudo: keep the config editable by its owner.
+        if let Some(inv) = invoker().filter(|inv| path.starts_with(&inv.home)) {
+            for p in dir.into_iter().chain([path]) {
+                chown(p, Some(inv.uid), Some(inv.gid))?;
+            }
+        }
+        Ok(())
     };
     write().map_err(|e| format!("nelze zapsat {}: {e}", path.display()))
 }
@@ -335,9 +383,22 @@ fn prune(cfg: &Config, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// The timer is a system unit once root has scheduled it, a user unit otherwise.
+fn system_timer() -> bool {
+    is_root() || Path::new(SYSTEM_UNITS).join(TIMER).exists()
+}
+
+fn unit_dir() -> Result<PathBuf, String> {
+    if system_timer() {
+        return Ok(PathBuf::from(SYSTEM_UNITS));
+    }
+    Ok(config_home()?.join("systemd").join("user"))
+}
+
 fn systemctl(args: &[&str]) -> Result<(), String> {
+    let scope: &[&str] = if system_timer() { &[] } else { &["--user"] };
     let out = Command::new("systemctl")
-        .arg("--user")
+        .args(scope)
         .args(args)
         .output()
         .map_err(|e| format!("nelze spustit systemctl: {e}"))?;
@@ -400,9 +461,32 @@ fn next_elapse(expr: &str) -> Result<String, String> {
 
 /// The schedule lives in the systemd user timer, which is generated here.
 fn set_schedule(input: &str) -> Result<String, String> {
-    let dir = config_home()?.join("systemd").join("user");
+    if !is_root() && system_timer() {
+        return Err("zálohy spouští systémový timer: použijte sudo lafe-backup schedule".into());
+    }
+    let dir = unit_dir()?;
     let timer = dir.join(TIMER);
     let io_err = |p: &Path, e: io::Error| format!("nelze zapsat {}: {e}", p.display());
+
+    // The system timer replaces the invoking user's own one.
+    if let Some(inv) = invoker() {
+        let own = inv.home.join(".config/systemd/user").join(TIMER);
+        if own.exists() {
+            let machine = format!("{}@", inv.name);
+            let out = Command::new("systemctl")
+                .args(["--user", "-M", &machine, "disable", "--now", TIMER])
+                .output()
+                .map_err(|e| format!("nelze spustit systemctl: {e}"))?;
+            if !out.status.success() {
+                return Err(format!(
+                    "nelze vypnout timer uživatele {}: {}",
+                    inv.name,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+            fs::remove_file(&own).map_err(|e| io_err(&own, e))?;
+        }
+    }
 
     if input == "off" {
         if timer.exists() {
@@ -419,9 +503,14 @@ fn set_schedule(input: &str) -> Result<String, String> {
     let service = dir.join(SERVICE);
     if !service.exists() {
         let exe = env::current_exe().map_err(|e| format!("nelze zjistit cestu k programu: {e}"))?;
+        // Root has no config of its own, so the unit names the one in use.
+        let config = match is_root() {
+            true => format!("Environment=\"LAFE_BACKUP_CONFIG={}\"\n", config_path()?.display()),
+            false => String::new(),
+        };
         let unit = format!(
             "[Unit]\nDescription=Záloha lafe-backup (nastavení: lafe-backup show)\n\n\
-             [Service]\nType=oneshot\nNice=10\nExecStart=\"{}\" run\n",
+             [Service]\nType=oneshot\nNice=10\n{config}ExecStart=\"{}\" run\n",
             exe.display()
         );
         fs::write(&service, unit).map_err(|e| io_err(&service, e))?;
@@ -446,14 +535,28 @@ fn set_schedule(input: &str) -> Result<String, String> {
 
 /// The calendar expression of the installed timer, if there is one.
 fn current_schedule() -> Option<String> {
-    let timer = config_home().ok()?.join("systemd").join("user").join(TIMER);
+    let timer = unit_dir().ok()?.join(TIMER);
     let text = fs::read_to_string(timer).ok()?;
     text.lines()
         .find_map(|l| l.strip_prefix("OnCalendar="))
         .map(str::to_string)
 }
 
+/// The invoking user's own timer, while no system timer has replaced it.
+fn invoker_schedule() -> Option<(String, String)> {
+    let inv = invoker()?;
+    if Path::new(SYSTEM_UNITS).join(TIMER).exists() {
+        return None;
+    }
+    let text = fs::read_to_string(inv.home.join(".config/systemd/user").join(TIMER)).ok()?;
+    let expr = text.lines().find_map(|l| l.strip_prefix("OnCalendar="))?;
+    Some((expr.to_string(), inv.name))
+}
+
 fn schedule_summary() -> String {
+    if let Some((expr, user)) = invoker_schedule() {
+        return format!("{expr} (timer uživatele {user}, běží bez práv roota)");
+    }
     match current_schedule() {
         None => "vypnuto".into(),
         Some(expr) if systemctl(&["is-enabled", "--quiet", TIMER]).is_ok() => expr,
