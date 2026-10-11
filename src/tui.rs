@@ -55,7 +55,7 @@ impl Field {
             Field::Dest => "Cílová složka",
             Field::Name => "Jméno archivu",
             Field::Keep => "Kolik záloh ponechat (0 = vše)",
-            Field::Schedule => "Výraz (daily 03:15, Mon,Thu 02:30, *-*-01 04:00, off)",
+            Field::Schedule => "Výraz (daily 03:15, 5m, 30s, Mon,Thu 02:30, *-*-01 04:00, off)",
             Field::Source => "Cesta k zálohování",
             Field::Exclude => "Jméno k vynechání",
         }
@@ -160,6 +160,8 @@ const DAYS: [(&str, &str); 7] = [
 /// The schedules the picker can express.
 #[derive(Clone, Copy)]
 enum Sched {
+    Seconds(u32),
+    Minutes(u32),
     Hours(u32),
     Daily { hour: u32, minute: u32 },
     Weekly { day: usize, hour: u32, minute: u32 },
@@ -174,6 +176,12 @@ impl Sched {
         }
         if let Some(n) = expr.strip_prefix("0/").and_then(|r| r.strip_suffix(":00:00")) {
             return n.parse().ok().filter(|n| (1..24).contains(n)).map(Sched::Hours);
+        }
+        if let Some(n) = expr.strip_prefix("*:0/").and_then(|r| r.strip_suffix(":00")) {
+            return n.parse().ok().filter(|n| (1..60).contains(n)).map(Sched::Minutes);
+        }
+        if let Some(n) = expr.strip_prefix("*:*:0/") {
+            return n.parse().ok().filter(|n| (1..60).contains(n)).map(Sched::Seconds);
         }
         let (day, time) = match expr.split_once(' ') {
             Some((d, time)) => (Some(DAYS.iter().position(|(name, _)| *name == d)?), time),
@@ -193,6 +201,12 @@ impl Sched {
 
     fn label(self) -> String {
         match self {
+            Sched::Seconds(1) => "každou sekundu".into(),
+            Sched::Seconds(n @ 2..=4) => format!("každé {n} sekundy"),
+            Sched::Seconds(n) => format!("každých {n} sekund"),
+            Sched::Minutes(1) => "každou minutu".into(),
+            Sched::Minutes(n @ 2..=4) => format!("každé {n} minuty"),
+            Sched::Minutes(n) => format!("každých {n} minut"),
             Sched::Hours(1) => "každou hodinu".into(),
             Sched::Hours(n @ 2..=4) => format!("každé {n} hodiny"),
             Sched::Hours(n) => format!("každých {n} hodin"),
@@ -206,6 +220,8 @@ impl Sched {
     /// What `set_schedule` accepts.
     fn command(self) -> String {
         match self {
+            Sched::Seconds(n) => format!("{n}s"),
+            Sched::Minutes(n) => format!("{n}m"),
             Sched::Hours(1) => "hourly".into(),
             Sched::Hours(n) => format!("{n}h"),
             Sched::Daily { hour, minute } => format!("{hour:02}:{minute:02}"),
@@ -219,14 +235,22 @@ impl Sched {
 #[derive(Clone, Copy)]
 enum Choice {
     Off,
+    Seconds(u32),
+    Minutes(u32),
     Hours(u32),
     Daily,
     Weekly,
     Custom,
 }
 
-const CHOICES: [Choice; 11] = [
+const CHOICES: [Choice; 17] = [
     Choice::Off,
+    Choice::Seconds(30),
+    Choice::Minutes(1),
+    Choice::Minutes(5),
+    Choice::Minutes(10),
+    Choice::Minutes(15),
+    Choice::Minutes(30),
     Choice::Hours(1),
     Choice::Hours(2),
     Choice::Hours(3),
@@ -261,6 +285,12 @@ impl Picker {
         };
         let pos = |want: fn(&Choice) -> bool| CHOICES.iter().position(want);
         p.sel = match Sched::parse(&expr) {
+            Some(Sched::Seconds(n)) => CHOICES
+                .iter()
+                .position(|c| matches!(c, Choice::Seconds(m) if *m == n)),
+            Some(Sched::Minutes(n)) => CHOICES
+                .iter()
+                .position(|c| matches!(c, Choice::Minutes(m) if *m == n)),
             Some(Sched::Hours(n)) => CHOICES
                 .iter()
                 .position(|c| matches!(c, Choice::Hours(m) if *m == n)),
@@ -281,6 +311,8 @@ impl Picker {
     fn sched(&self, choice: Choice) -> Option<Sched> {
         let (day, hour, minute) = (self.day, self.hour, self.minute);
         match choice {
+            Choice::Seconds(n) => Some(Sched::Seconds(n)),
+            Choice::Minutes(n) => Some(Sched::Minutes(n)),
             Choice::Hours(n) => Some(Sched::Hours(n)),
             Choice::Daily => Some(Sched::Daily { hour, minute }),
             Choice::Weekly => Some(Sched::Weekly { day, hour, minute }),

@@ -50,7 +50,8 @@ Settings are stored in `~/.config/lafe-backup/config` (set the
 ## Automatic backups
 
 The frequency is set on the “Četnost” (frequency) row of the interactive UI –
-`Enter` on it opens a picker (hourly, every 2–12 hours, daily, weekly, off),
+`Enter` on it opens a picker (every 30 seconds, every 1–30 minutes, hourly, every 2–12 hours,
+daily, weekly, off),
 where `←` `→` change the hour and `Tab` the day of the week – or with the
 `schedule` command, which generates and enables a systemd user timer
 (`~/.config/systemd/user/lafe-backup.{service,timer}`):
@@ -58,6 +59,8 @@ where `←` `→` change the hour and `Tab` the day of the week – or with the
 ```sh
 lafe-backup schedule daily 03:00   # every day at 03:00
 lafe-backup schedule 6h            # every 6 hours
+lafe-backup schedule 5m            # every 5 minutes
+lafe-backup schedule 30s           # every 30 seconds
 lafe-backup schedule hourly        # every hour
 lafe-backup schedule Mon 02:30     # every Monday at 02:30
 lafe-backup schedule off           # turn automatic backups off

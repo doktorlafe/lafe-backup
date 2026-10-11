@@ -22,7 +22,7 @@ Použití:
   lafe-backup unexclude <jméno>... přestat je přeskakovat
   lafe-backup keep <n>             kolik posledních archivů ponechat (0 = nemazat)
   lafe-backup name <jméno>         prefix archivu -> <jméno>-RRRRMMDD-HHMMSS.tar.gz
-  lafe-backup schedule <kdy>       jak často zálohovat: daily 03:00, 6h, hourly,
+  lafe-backup schedule <kdy>       jak často zálohovat: daily 03:00, 6h, 5m, 30s, hourly,
                                    Mon 02:30, weekly, off (nebo systemd OnCalendar)
   lafe-backup show | list          vypsat aktuální nastavení
   lafe-backup run [--dry-run]      provést zálohu (--dry-run jen vypíše, co by se zálohovalo)
@@ -351,11 +351,24 @@ fn systemctl(args: &[&str]) -> Result<(), String> {
     ))
 }
 
-/// Turns `6h` or `daily 03:00` into a systemd calendar expression. Anything
-/// else (`hourly`, `Mon 02:30`, `*-*-01 04:00`) already is one.
+/// Turns `6h`, `5m`, `30s` or `daily 03:00` into a systemd calendar expression.
+/// Anything else (`hourly`, `Mon 02:30`, `*-*-01 04:00`) already is one.
 fn calendar_expr(input: &str) -> Result<String, String> {
     if input.contains('\n') {
         return Err("četnost nesmí obsahovat nový řádek".into());
+    }
+    let count = |unit: &str| input.strip_suffix(unit).and_then(|n| n.parse::<u32>().ok());
+    if let Some(n) = count("s") {
+        return match n {
+            1..=59 => Ok(format!("*:*:0/{n}")),
+            _ => Err("interval v sekundách musí být 1s až 59s (jinak 1m)".into()),
+        };
+    }
+    if let Some(n) = count("min").or_else(|| count("m")) {
+        return match n {
+            1..=59 => Ok(format!("*:0/{n}:00")),
+            _ => Err("interval v minutách musí být 1m až 59m (jinak hourly)".into()),
+        };
     }
     if let Some(n) = input.strip_suffix('h').and_then(|n| n.parse::<u32>().ok()) {
         return match n {
@@ -413,9 +426,15 @@ fn set_schedule(input: &str) -> Result<String, String> {
         );
         fs::write(&service, unit).map_err(|e| io_err(&service, e))?;
     }
+    // Intervals under an hour must fire on time: no jitter, no coalescing.
+    let timing = if expr.starts_with("*:") {
+        "AccuracySec=1s"
+    } else {
+        "RandomizedDelaySec=10min"
+    };
     let unit = format!(
         "[Unit]\nDescription=Automatická záloha lafe-backup\n\n\
-         [Timer]\nOnCalendar={expr}\nRandomizedDelaySec=10min\nPersistent=true\n\n\
+         [Timer]\nOnCalendar={expr}\n{timing}\nPersistent=true\n\n\
          [Install]\nWantedBy=timers.target\n"
     );
     fs::write(&timer, unit).map_err(|e| io_err(&timer, e))?;
