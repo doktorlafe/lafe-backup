@@ -26,7 +26,11 @@ works from a network drive without execute permission) and installs it to
 
 ## Usage
 
-Running `lafe-backup` on its own opens the interactive settings:
+Run it without arguments to open the interactive menu:
+
+```sh
+lafe-backup
+```
 
 | Key | Action |
 | --- | --- |
@@ -39,21 +43,6 @@ Running `lafe-backup` on its own opens the interactive settings:
 | `d` | remove a source or an excluded name |
 | `r` | run a backup |
 | `q` | quit |
-
-The same can be done with commands:
-
-```
-lafe-backup add <path>...        add folders/files to back up
-lafe-backup remove <path>...     stop backing them up
-lafe-backup dest <folder>        set where archives are stored
-lafe-backup exclude <name>...    skip files/folders with this name
-lafe-backup unexclude <name>...  stop skipping them
-lafe-backup keep <n>             how many recent archives to keep (0 = never delete)
-lafe-backup name <name>          archive prefix -> <name>-YYYYMMDD-HHMMSS.tar.gz
-lafe-backup schedule <when>      how often to back up (see below)
-lafe-backup show | list          print the current settings
-lafe-backup run [--dry-run]      run a backup (--dry-run only lists what would be backed up)
-```
 
 Settings are stored in `~/.config/lafe-backup/config` (set the
 `LAFE_BACKUP_CONFIG` variable to use a different path).
@@ -85,4 +74,22 @@ plain `tar`:
 
 ```sh
 tar -xzf lafe-arm-20261010-225854.tar.gz -C /target/folder
+```
+
+## Commands
+
+Everything in the menu can also be done from the command line. Run
+`lafe-backup --help` for the list:
+
+```
+lafe-backup add <path>...        add folders/files to back up
+lafe-backup remove <path>...     stop backing them up
+lafe-backup dest <folder>        set where archives are stored
+lafe-backup exclude <name>...    skip files/folders with this name
+lafe-backup unexclude <name>...  stop skipping them
+lafe-backup keep <n>             how many recent archives to keep (0 = never delete)
+lafe-backup name <name>          archive prefix -> <name>-YYYYMMDD-HHMMSS.tar.gz
+lafe-backup schedule <when>      how often to back up (see Automatic backups)
+lafe-backup show | list          print the current settings
+lafe-backup run [--dry-run]      run a backup (--dry-run only lists what would be backed up)
 ```
